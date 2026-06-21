@@ -1,0 +1,8 @@
+venv/
+dataset/
+model/
+.git/
+__pycache__/
+*.pyc
+camera_test.py
+README_images/
