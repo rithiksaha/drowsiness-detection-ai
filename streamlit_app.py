@@ -1,195 +1,205 @@
 import streamlit as st
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+import streamlit.components.v1 as components
+
+import av
 import cv2
 import mediapipe as mp
-import numpy as np
+import math
+import os
 import base64
 
 
-# ===============================
-# PAGE CONFIG
-# ===============================
+# ======================
+# CONFIG
+# ======================
+
+ALARM_FILE = "assets/alarm.wav"
+
+
+def play_alarm():
+
+    if os.path.exists(ALARM_FILE):
+
+        with open(ALARM_FILE, "rb") as f:
+            sound = f.read()
+
+        encoded = base64.b64encode(sound).decode()
+
+
+        components.html(
+            f"""
+            <audio id="alarmSound" autoplay loop>
+                <source
+                src="data:audio/wav;base64,{encoded}"
+                type="audio/wav">
+            </audio>
+
+            <script>
+
+            let audio =
+            document.getElementById("alarmSound");
+
+            audio.volume = 1.0;
+
+            audio.play();
+
+            </script>
+            """,
+            height=0,
+        )
+
+
+
+# ======================
+# PAGE
+# ======================
 
 st.set_page_config(
-    page_title="AI Driver Monitoring",
+    page_title="AI Driver Drowsiness Detection",
     page_icon="🚗",
     layout="wide"
 )
 
 
-# ===============================
-# ALARM
-# ===============================
-
-def play_alarm():
-
-    try:
-        with open("assets/alarm.wav", "rb") as f:
-            sound = f.read()
-
-        encoded = base64.b64encode(sound).decode()
-
-        st.markdown(
-            f"""
-            <audio autoplay>
-            <source 
-            src="data:audio/wav;base64,{encoded}" 
-            type="audio/wav">
-            </audio>
-            """,
-            unsafe_allow_html=True
-        )
-
-    except:
-        pass
-
-
-
-# ===============================
-# UI
-# ===============================
-
-st.title(
-    "🚗 AI Driver Drowsiness Detection System"
-)
-
-st.caption(
-    "MediaPipe + Eye Aspect Ratio (EAR) + OpenCV"
+st.markdown(
+"""
+<h1 style='text-align:center;color:#00ffaa'>
+🚗 AI Driver Drowsiness Detection System
+</h1>
+<hr>
+""",
+unsafe_allow_html=True
 )
 
 
+
+# ======================
+# SIDEBAR
+# ======================
 
 st.sidebar.header(
-    "⚙️ Configuration"
+    "⚙️ Detection Controls"
 )
 
 
 EAR_THRESHOLD = st.sidebar.slider(
-    "Eye Aspect Ratio Threshold",
+    "👁 Eye Aspect Ratio Threshold",
     0.10,
     0.40,
-    0.25
+    0.23,
+    0.01
 )
 
 
 FRAME_LIMIT = st.sidebar.slider(
-    "Drowsy Frames",
+    "😴 Drowsy Frame Limit",
     5,
-    60,
-    20
+    50,
+    15
 )
 
 
 
-col1,col2,col3 = st.columns(3)
+# ======================
+# STATE
+# ======================
 
-status_box = col1.empty()
-ear_box = col2.empty()
-alert_box = col3.empty()
-
-
-camera_window = st.empty()
+if "ear" not in st.session_state:
+    st.session_state.ear = 0
 
 
+if "frames" not in st.session_state:
+    st.session_state.frames = 0
 
-# ===============================
+
+if "status" not in st.session_state:
+    st.session_state.status = "🟢 ACTIVE"
+
+
+
+# ======================
 # MEDIAPIPE
-# ===============================
+# ======================
 
 mp_face_mesh = mp.solutions.face_mesh
 
 
-face_mesh = mp_face_mesh.FaceMesh(
-    max_num_faces=1,
-    refine_landmarks=True
-)
-
-
-
 LEFT_EYE=[
-    33,160,158,133,153,144
+    362,385,387,
+    263,373,380
 ]
 
 
 RIGHT_EYE=[
-    362,385,387,263,373,380
+    33,160,158,
+    133,153,144
 ]
 
 
+def distance(a,b):
 
-def calculate_EAR(points):
+    return math.dist(a,b)
 
-    points=np.array(points)
 
-    A=np.linalg.norm(
-        points[1]-points[5]
+
+def EAR(points):
+
+    A=distance(
+        points[1],
+        points[5]
     )
 
-    B=np.linalg.norm(
-        points[2]-points[4]
+    B=distance(
+        points[2],
+        points[4]
     )
 
-    C=np.linalg.norm(
-        points[0]-points[3]
+    C=distance(
+        points[0],
+        points[3]
     )
-
 
     return (A+B)/(2*C)
 
 
 
-
-counter=0
-
-
-start = st.button(
-    "▶ Start Monitoring"
-)
+# ======================
+# VIDEO PROCESSOR
+# ======================
 
 
-
-# ===============================
-# CAMERA LOOP
-# ===============================
+class Detector(VideoProcessorBase):
 
 
-if start:
+    def __init__(self):
 
+        self.mesh = mp_face_mesh.FaceMesh(
+            max_num_faces=1,
+            refine_landmarks=True
+        )
 
-    cap=cv2.VideoCapture(0)
-
-
-    while True:
-
-
-        success,frame=cap.read()
-
-
-        if not success:
-
-            st.error(
-                "Camera not available"
-            )
-
-            break
+        self.counter = 0
 
 
 
-        rgb=cv2.cvtColor(
-            frame,
+    def recv(self, frame):
+
+        img = frame.to_ndarray(
+            format="bgr24"
+        )
+
+
+        rgb = cv2.cvtColor(
+            img,
             cv2.COLOR_BGR2RGB
         )
 
 
-        result=face_mesh.process(
-            rgb
-        )
+        result = self.mesh.process(rgb)
 
 
-
-        status="NO FACE"
-
-        ear_value=0
-
+        h,w,_ = img.shape
 
 
         if result.multi_face_landmarks:
@@ -198,46 +208,26 @@ if start:
             face=result.multi_face_landmarks[0]
 
 
-            h,w,_=frame.shape
+            left=[]
+            right=[]
 
 
+            for i in LEFT_EYE:
 
-            left=[
-                [
-                int(face.landmark[i].x*w),
-                int(face.landmark[i].y*h)
-                ]
+                lm=face.landmark[i]
 
-                for i in LEFT_EYE
-            ]
-
-
-            right=[
-                [
-                int(face.landmark[i].x*w),
-                int(face.landmark[i].y*h)
-                ]
-
-                for i in RIGHT_EYE
-            ]
+                point=(
+                    int(lm.x*w),
+                    int(lm.y*h)
+                )
 
 
+                left.append(point)
 
-            ear_value=(
-
-                calculate_EAR(left)
-                +
-                calculate_EAR(right)
-
-            )/2
-
-
-
-            for p in left+right:
 
                 cv2.circle(
-                    frame,
-                    tuple(p),
+                    img,
+                    point,
                     3,
                     (0,255,0),
                     -1
@@ -245,67 +235,184 @@ if start:
 
 
 
-            if ear_value < EAR_THRESHOLD:
+            for i in RIGHT_EYE:
+
+                lm=face.landmark[i]
+
+                point=(
+                    int(lm.x*w),
+                    int(lm.y*h)
+                )
 
 
-                counter += 1
+                right.append(point)
 
 
-                if counter > FRAME_LIMIT:
+                cv2.circle(
+                    img,
+                    point,
+                    3,
+                    (0,255,0),
+                    -1
+                )
 
-                    status="DROWSY 🚨"
 
-                    play_alarm()
+
+            ear = (
+                EAR(left)
+                +
+                EAR(right)
+            ) / 2
+
+
+
+            if ear < EAR_THRESHOLD:
+
+                self.counter += 1
+
+            else:
+
+                self.counter = 0
+
+
+
+            if self.counter >= FRAME_LIMIT:
+
+                status="🚨 DROWSY"
+
+                color=(0,0,255)
 
 
             else:
 
-                counter=0
+                status="🟢 ACTIVE"
 
-                status="AWAKE 😊"
-
-
+                color=(0,255,0)
 
 
 
-        status_box.metric(
-            "Driver Status",
-            status
-        )
-
-
-        ear_box.metric(
-            "👁 EAR Value",
-            round(
-                ear_value,
+            st.session_state.ear = round(
+                ear,
                 3
             )
+
+
+            st.session_state.frames = self.counter
+
+
+            st.session_state.status = status
+
+
+
+            cv2.putText(
+                img,
+                status,
+                (30,60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                color,
+                3
+            )
+
+
+            cv2.putText(
+                img,
+                f"EAR: {ear:.2f}",
+                (30,110),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (255,255,0),
+                2
+            )
+
+
+
+        return av.VideoFrame.from_ndarray(
+            img,
+            format="bgr24"
         )
 
 
 
-        if "DROWSY" in status:
+# ======================
+# DASHBOARD
+# ======================
 
-            alert_box.error(
-                "WAKE UP!"
-            )
-
-        else:
-
-            alert_box.success(
-                "Safe"
-            )
+camera,panel = st.columns(
+    [3,1]
+)
 
 
+with camera:
+
+    st.subheader(
+        "📹 Live Driver Camera"
+    )
 
 
-        camera_window.image(
-            cv2.cvtColor(
-                frame,
-                cv2.COLOR_BGR2RGB
-            )
+    webrtc_streamer(
+
+        key="camera",
+
+        video_processor_factory=Detector,
+
+        media_stream_constraints={
+            "video":True,
+            "audio":False
+        }
+    )
+
+
+
+with panel:
+
+
+    st.subheader(
+        "📊 Monitoring Panel"
+    )
+
+
+    st.metric(
+        "👁 Eye Aspect Ratio",
+        st.session_state.ear
+    )
+
+
+    st.metric(
+        "😴 Drowsy Frames",
+        st.session_state.frames
+    )
+
+
+    st.metric(
+        "🚨 Status",
+        st.session_state.status
+    )
+
+
+
+    if st.session_state.status == "🚨 DROWSY":
+
+
+        st.error(
+            "🚨 WAKE UP DRIVER"
+        )
+
+
+        play_alarm()
+
+
+    else:
+
+
+        st.success(
+            "Driver Awake 🟢"
         )
 
 
 
-    cap.release()
+st.markdown("---")
+
+st.caption(
+    "MediaPipe FaceMesh + EAR Algorithm + Streamlit WebRTC + Docker 🐳"
+)
